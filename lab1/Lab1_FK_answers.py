@@ -162,19 +162,21 @@ def part3_retarget_func(T_pose_bvh_path, A_pose_bvh_path):
             T_joint_index = T_joint_name_to_joint_index.get(name)
             A_joint_index = A_joint_name_to_joint_index.get(name)
 
-            if (T_joint_index is None) or (A_joint_index is None):
-                raise ValueError(f"Joint name {name} not found in BVH files.")
-            
-            r_original = R.from_euler('XYZ', A_frame_motion[3 + A_joint_index*3 : 6 + (A_joint_index)*3], degrees=True)
-            r_quaternion = r_original.as_quat()
-            if name == 'lShoulder':
-                T_frame_motion[3 + 3 * T_joint_index:6 + 3 * T_joint_index] = R.from_quat(R.from_euler('XYZ', [0, 0, 45], degrees=True).as_quat() * r_quaternion).as_euler('XYZ', degrees=True)
-            elif name == 'rShoulder':
-                T_frame_motion[3 + 3 * T_joint_index:6 + 3 * T_joint_index]= R.from_quat(R.from_euler('XYZ', [0, 0, -45], degrees=True).as_quat() * r_quaternion).as_euler('XYZ', degrees=True)
-            elif T_joint_index == 0:
+            if T_joint_index == 0:
                 T_frame_motion[0:6] = A_frame_motion[0:6]
+                continue
+            
+            A_rotation = R.from_euler('XYZ', A_frame_motion[3 + A_joint_index*3 : 6 + A_joint_index*3], degrees=True)
+            
+            if name == 'lShoulder':
+                # 修正肩膀旋转
+                correction = R.from_euler('XYZ', (0, 0, -45.), degrees=True)
+                T_frame_motion[3 + 3 * T_joint_index:6 + 3 * T_joint_index] = (A_rotation * correction).as_euler('XYZ', degrees=True)
+            elif name == 'rShoulder':
+                correction = R.from_euler('XYZ', (0, 0, 45.), degrees=True)
+                T_frame_motion[3 + 3 * T_joint_index:6 + 3 * T_joint_index] = (A_rotation * correction).as_euler('XYZ', degrees=True)
             else:
-                T_frame_motion[3 + 3 * T_joint_index:6 + 3 * T_joint_index] = r_original.as_euler('XYZ', degrees=True)
+                T_frame_motion[3 + 3 * T_joint_index:6 + 3 * T_joint_index] = A_rotation.as_euler('XYZ', degrees=True)
 
         motion_data[i] = T_frame_motion
 

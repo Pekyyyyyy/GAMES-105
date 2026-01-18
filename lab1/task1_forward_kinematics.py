@@ -71,7 +71,7 @@ def part3_retarget(viewer, T_pose_bvh_path, A_pose_bvh_path):
 def main():
     # create a viewer
     viewer = SimpleViewer()
-    bvh_file_path = "GAMES-105\\lab1\\data\\walk60.bvh"
+    bvh_file_path = "lab1\\data\\walk60.bvh"
 
     # 请取消注释需要运行的代码
     # part1
@@ -82,7 +82,7 @@ def main():
     # part2_animation(viewer, bvh_file_path)
 
     # part3
-    part3_retarget(viewer, "GAMES-105\\lab1\\data\\walk60.bvh", "GAMES-105\\lab1\\data\\A_pose_run.bvh")
+    part3_retarget(viewer, "lab1\\data\\walk60.bvh", "lab1\\data\\A_pose_run.bvh")
 
 
 if __name__ == "__main__":

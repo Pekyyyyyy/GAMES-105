@@ -327,7 +327,7 @@ class SimpleViewer(ShowBase):
         return task.cont
     
     def load_character(self):
-        info = np.load(r'GAMES-105\lab1\character_model.npy', allow_pickle=True).item()
+        info = np.load(r'lab1\character_model.npy', allow_pickle=True).item()
         joint_pos = info['joint_pos']
         body_pos = info['body_pos']
         joint_name = info['joint_name']
