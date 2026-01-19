@@ -59,7 +59,7 @@ def part1_simple(viewer, target_pos):
     joint_position = viewer.get_joint_positions()
     joint_orientation = viewer.get_joint_orientations()
     
-    joint_position, joint_orientation = part1_inverse_kinematics(meta_data, joint_position, joint_orientation, target_pos)
+    joint_position, joint_orientation = part1_inverse_kinematics_CCD(meta_data, joint_position, joint_orientation, target_pos)
     viewer.show_pose(joint_name, joint_position, joint_orientation)
     viewer.run()
     pass
@@ -75,7 +75,7 @@ def part1_hard(viewer, target_pos):
     joint_position = viewer.get_joint_positions()
     joint_orientation = viewer.get_joint_orientations()
     
-    joint_position, joint_orientation = part1_inverse_kinematics(meta_data, joint_position, joint_orientation, target_pos)
+    joint_position, joint_orientation = part1_inverse_kinematics_CCD(meta_data, joint_position, joint_orientation, target_pos)
     viewer.show_pose(joint_name, joint_position, joint_orientation)
     viewer.run()
     pass
@@ -107,7 +107,7 @@ def part1_animation(viewer, target_pos):
     viewer.run()
 
 
-def part2(viewer, bvh_name):
+def part2(viewer, bvh_name, max_degree = 0.1):
     motion_data = load_motion_data(bvh_name)
     bvh_joint_name, bvh_joint_parent, bvh_offset = part1_calculate_T_pose(bvh_name)
     joint_name, _, joint_initial_position = viewer.get_meta_data()
@@ -168,12 +168,12 @@ def main():
     viewer = SimpleViewer()
     
     # part1
-    part1_simple(viewer, np.array([0.5, 0.75, 0.5]))
-    # part1_hard(viewer, np.array([0.5, 0.5, 0.5]))
+    # part1_simple(viewer, np.array([0.5, 0.75, 0.5]))
+    part1_hard(viewer, np.array([0.5, 0.5, 0.5]))
     # part1_animation(viewer, np.array([0.5, 0.5, 0.5]))
     
     # part2
-    # part2(viewer, 'data/walk60.bvh')
+    # part2(viewer, 'lab1/data/walk60.bvh')
     
     # bonus(viewer, np.array([0.5, 0.5, 0.5]), np.array([0, 0.5, 0.5]))
 
