@@ -56,7 +56,7 @@ def create_virtual_joint_path(meta_data, joint_offsets: np.ndarray, joint_local_
                 # 逆向：curr是prev的父节点
                 virtual_offsets.append(-joint_offsets[prev_idx].copy())
                 # 虚拟局部旋转是实际旋转的逆
-                prev_rot = R.from_quat(joint_local_rotations[prev_idx].copy())
+                prev_rot = joint_local_rotations[prev_idx]
                 virtual_local_eulers.append(prev_rot.inv().as_euler("XYZ"))
     
     return virtual_offsets, virtual_local_eulers
@@ -90,6 +90,7 @@ def part1_inverse_kinematics(meta_data, joint_positions, joint_orientations, tar
 
     chain_offsets_t = torch.tensor(np.array(chain_offsets), dtype=torch.float32)
     chain_local_eulers_t = torch.tensor(np.array(chain_local_eulers), dtype=torch.float32, requires_grad=True)
+    chain_local_eulers_init_t = torch.tensor(np.array(chain_local_eulers.copy()), dtype=torch.float32)
     target_pose_t = torch.tensor(target_pose, dtype=torch.float32)
 
     max_iter = 30
@@ -109,7 +110,7 @@ def part1_inverse_kinematics(meta_data, joint_positions, joint_orientations, tar
             curr_global_pos = curr_global_pos + curr_global_rot @ chain_offsets_t[ik_idx]
             curr_global_rot = curr_global_rot @ r_local_rot
         
-        error = torch.norm(curr_global_pos - target_pose_t)
+        error = torch.norm(curr_global_pos - target_pose_t) + torch.norm(chain_local_eulers_t - chain_local_eulers_init_t)
         if error < threshold:
             print(f"error{error} < threshold{threshold}")
         print(f"End Effector Pos:{str(curr_global_pos)}, error:{str(error)}.")
@@ -142,14 +143,13 @@ def part1_inverse_kinematics(meta_data, joint_positions, joint_orientations, tar
         joint_positions[curr_idx] = curr_pos
         joint_orientations[curr_idx] = curr_orient.as_quat()
     
-    # 第二步：更新所有非IK链上的节点
     for idx in range(len(joint_positions)):
         p = joint_parents[idx]
         
         if p == -1:
-            continue  # Root已经处理过
+            continue
         if idx in ik_joint_path:
-            continue  # IK链上的节点已经处理过
+            continue
         
         # 非IK链节点：保持Local不变，跟随父节点
         parent_pos = joint_positions[p]
