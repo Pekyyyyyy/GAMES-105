@@ -557,7 +557,28 @@ def part2_inverse_kinematics(meta_data, joint_positions, joint_orientations, rel
 def bonus_inverse_kinematics(meta_data, joint_positions, joint_orientations, left_target_pose, right_target_pose):
     """
     输入左手和右手的目标位置，固定左脚，完成函数，计算逆运动学
+    双约束IK问题：同时满足左手和右手的目标位置，固定左脚
     """
-    joint_positions, joint_orientations = (meta_data, joint_positions, joint_orientations, left_target_pose)
-    # joint_positions, joint_orientations = part1_inverse_kinematics_CCD(meta_data, joint_positions, joint_orientations, right_target_pose)
+    joint_name = meta_data.joint_name
+    joint_parents = meta_data.joint_parent
+    
+    max_iterations = 10
+    for iteration in range(max_iterations):
+        # 第一步：创建左手IK的元数据（从左脚到左手）
+        meta_data.end_joint = 'lWrist_end'
+        joint_positions, joint_orientations = part1_inverse_kinematics(
+            meta_data, 
+            joint_positions, 
+            joint_orientations, 
+            left_target_pose)
+                
+        # 第二步：对右手进行IK（从根节点到右手）
+        meta_data.end_joint = 'rWrist_end'
+        joint_positions, joint_orientations = part1_inverse_kinematics(
+            meta_data,
+            joint_positions,
+            joint_orientations,
+            right_target_pose,
+        )
+
     return joint_positions, joint_orientations
