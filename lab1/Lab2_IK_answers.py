@@ -6,10 +6,79 @@ from scipy.spatial.transform import Rotation as R
 import torch
 from scipy.optimize._numdiff import approx_derivative
 
-def part1_inverse_kinematics_quat(meta_data, joint_positions, joint_orientations, target_pose):
+# [0.6036, 1.2825, 0.0000]
+def euler_to_mat(angle_vec):
+        x, y, z = angle_vec[0], angle_vec[1], angle_vec[2]
+        cx, sx = torch.cos(x), torch.sin(x)
+        cy, sy = torch.cos(y), torch.sin(y)
+        cz, sz = torch.cos(z), torch.sin(z)
+        
+        zeros = torch.zeros_like(x)
+        ones = torch.ones_like(x)
+        
+        rx = torch.stack([torch.stack([ones, zeros, zeros]), torch.stack([zeros, cx, -sx]), torch.stack([zeros, sx, cx])])
+        ry = torch.stack([torch.stack([cy, zeros, sy]), torch.stack([zeros, ones, zeros]), torch.stack([-sy, zeros, cy])])
+        rz = torch.stack([torch.stack([cz, -sz, zeros]), torch.stack([sz, cz, zeros]), torch.stack([zeros, zeros, ones])])
+        
+        return rx @ ry @ rz
+
+def create_virtual_joint_path(meta_data, joint_offsets: np.ndarray, joint_local_rotations: np.ndarray, root_joint_orientation):
+    """
+    创建虚拟链条，以ik_joint_path[0]为root节点，计算local_rot
+    处理IK路径中可能包含逆向连接的情况（如从脚→腰→手）
+    
+    输出：
+        virtual_offsets: 虚拟链条中相邻节点间的偏移
+        virtual_local_rots: 虚拟链条中每个节点相对于前一个节点的局部旋转
+    """
+    ik_joint_path, _, path1, path2 = meta_data.get_path_from_root_to_end()
+    joint_parents = meta_data.joint_parent
+    
+    virtual_offsets = []
+    virtual_local_eulers = []
+
+    # 虚拟链条以ik_joint_path[0]为起点
+    for i in range(len(ik_joint_path)):
+        if i == 0:
+            # 根节点的偏移为0
+            virtual_offsets.append(np.zeros(3))
+            # 根节点的局部旋转就是其全局旋转
+            virtual_local_eulers.append(root_joint_orientation.as_euler("XYZ"))
+        else:
+            curr_idx = ik_joint_path[i]
+            prev_idx = ik_joint_path[i - 1]
+            
+            if joint_parents[curr_idx] == prev_idx:
+                # 正向：curr是prev的子节点
+                virtual_offsets.append(joint_offsets[curr_idx].copy())
+                virtual_local_eulers.append(joint_local_rotations[curr_idx].as_euler("XYZ"))
+            else:
+                # 逆向：curr是prev的父节点
+                virtual_offsets.append(-joint_offsets[prev_idx].copy())
+                # 虚拟局部旋转是实际旋转的逆
+                prev_rot = R.from_quat(joint_local_rotations[prev_idx].copy())
+                virtual_local_eulers.append(prev_rot.inv().as_euler("XYZ"))
+    
+    return virtual_offsets, virtual_local_eulers
+
+
+def part1_inverse_kinematics(meta_data, joint_positions, joint_orientations, target_pose):
     ik_joint_path, _, _, _ = meta_data.get_path_from_root_to_end()
     joint_parents = meta_data.joint_parent
+    
+    original_orientations = joint_orientations.copy()
+    # 存储所有关节的局部旋转
+    local_rotations = [] 
+    for idx in range(len(joint_positions)):
+        p = joint_parents[idx]
+        curr_q = R.from_quat(original_orientations[idx])
+        if p == -1:
+            local_rotations.append(curr_q)
+        else:
+            parent_q = R.from_quat(original_orientations[p])
+            local_rotations.append(parent_q.inv() * curr_q)
 
+    # 计算所有关节的偏移量
     joint_offsets = []
     for idx in range(len(joint_positions)):
         if idx == 0:
@@ -17,107 +86,80 @@ def part1_inverse_kinematics_quat(meta_data, joint_positions, joint_orientations
         else:
             p = joint_parents[idx]
             joint_offsets.append(meta_data.joint_initial_position[idx] - meta_data.joint_initial_position[p])
-    joint_offsets_t = torch.tensor(np.array(joint_offsets), dtype=torch.float32)
+    chain_offsets, chain_local_eulers = create_virtual_joint_path(meta_data, joint_offsets, local_rotations, R.from_quat(joint_orientations[ik_joint_path[0]]))
 
-    local_quats_data = []
-    for ik_idx in range(len(ik_joint_path)):
-        idx = ik_joint_path[ik_idx]
-        parent_idx = joint_parents[idx]
-        curr_q = R.from_quat(joint_orientations[idx])
-        
-        if parent_idx == -1:
-            local_quats_data.append(curr_q.as_quat())
-        else:
-            parent_q_inv = R.from_quat(joint_orientations[parent_idx]).inv()
-            local_quats_data.append((parent_q_inv * curr_q).as_quat())
-            
-    local_quats_var = torch.tensor(np.array(local_quats_data), dtype=torch.float32, requires_grad=True)
+    chain_offsets_t = torch.tensor(np.array(chain_offsets), dtype=torch.float32)
+    chain_local_eulers_t = torch.tensor(np.array(chain_local_eulers), dtype=torch.float32, requires_grad=True)
     target_pose_t = torch.tensor(target_pose, dtype=torch.float32)
 
-    def quat_mul(q1, q2):
-        x1, y1, z1, w1 = q1[0], q1[1], q1[2], q1[3]
-        x2, y2, z2, w2 = q2[0], q2[1], q2[2], q2[3]        
-        w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
-        x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
-        y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
-        z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-        
-        return torch.stack([x, y, z, w])
+    max_iter = 30
+    alpha = 0.01
+    threshold = 1e-4
+    optimizer = torch.optim.Adam([chain_local_eulers_t], lr=alpha)
+    for epoch in range(max_iter):
+        optimizer.zero_grad()
+        root_idx = ik_joint_path[0]
+        curr_global_pos = torch.tensor(joint_positions[root_idx], dtype=torch.float32)
+        curr_global_rot = euler_to_mat(chain_local_eulers_t[0])
 
-    # 辅助函数：四元数旋转向量 (Batch支持)
-    def quat_apply(q, v):
-        xyz = q[:3]
-        w = q[3]
-        t = 2 * torch.cross(xyz, v)
-        return v + w * t + torch.cross(xyz, t)
+        # 跳过根节点，计算效应器位置
+        for ik_idx in range(1, len(ik_joint_path)):
+            idx = ik_joint_path[ik_idx]
+            r_local_rot = euler_to_mat(chain_local_eulers_t[ik_idx])
+            curr_global_pos = curr_global_pos + curr_global_rot @ chain_offsets_t[ik_idx]
+            curr_global_rot = curr_global_rot @ r_local_rot
         
-    def quat_inv(q):
-        # 四元数逆（单位四元数的逆等于共轭）：q_inv = [-x, -y, -z, w]
-        q_inv = q.clone()
-        q_inv[0] = -q_inv[0]
-        q_inv[1] = -q_inv[1]
-        q_inv[2] = -q_inv[2]
-        return q_inv
+        error = torch.norm(curr_global_pos - target_pose_t)
+        if error < threshold:
+            print(f"error{error} < threshold{threshold}")
+        print(f"End Effector Pos:{str(curr_global_pos)}, error:{str(error)}.")
+        error.backward()
+        optimizer.step()
 
-    optimizer = torch.optim.Adam([local_quats_var], lr=0.1) # 步长可以大一点
+    # 重建节点
+    final_eulers = chain_local_eulers_t.detach().cpu().numpy()
     
     root_idx = ik_joint_path[0]
-    if joint_parents[root_idx] == -1:
-        root_parent_global_q = torch.tensor([0, 0, 0, 1], dtype=torch.float32) # Identity
-    else:
-        root_parent_global_q = torch.tensor(joint_orientations[joint_parents[root_idx]], dtype=torch.float32)
+    
+    root_local_quat = R.from_euler("XYZ", final_eulers[0], degrees=False)
+    joint_orientations[root_idx] = root_local_quat.as_quat()
+    curr_pos = joint_positions[root_idx].copy()
+    curr_orient = root_local_quat
+    
+    # 遍历虚拟链条，从第1个节点开始
+    for i in range(1, len(ik_joint_path)):
+        curr_idx = ik_joint_path[i]
+        prev_idx = ik_joint_path[i - 1]
+        
+        # 获取虚拟链条上的局部旋转和偏移
+        local_euler = final_eulers[i]
+        local_quat = R.from_euler("XYZ", local_euler, degrees=False)
+        offset = chain_offsets[i]
+        
+        curr_pos = curr_pos + curr_orient.apply(offset)
+        curr_orient = curr_orient * local_quat
+        
+        joint_positions[curr_idx] = curr_pos
+        joint_orientations[curr_idx] = curr_orient.as_quat()
+    
+    # 第二步：更新所有非IK链上的节点
+    for idx in range(len(joint_positions)):
+        p = joint_parents[idx]
+        
+        if p == -1:
+            continue  # Root已经处理过
+        if idx in ik_joint_path:
+            continue  # IK链上的节点已经处理过
+        
+        # 非IK链节点：保持Local不变，跟随父节点
+        parent_pos = joint_positions[p]
+        parent_rot = R.from_quat(joint_orientations[p])
+        local_r = local_rotations[idx]
+        
+        joint_orientations[idx] = (parent_rot * local_r).as_quat()
+        offset = meta_data.joint_initial_position[idx] - meta_data.joint_initial_position[p]
+        joint_positions[idx] = parent_pos + parent_rot.apply(offset)
 
-    for epoch in range(100):
-        optimizer.zero_grad()
-        
-        # 在每次 Forward 前，对优化变量进行归一化！
-        normalized_quats = torch.nn.functional.normalize(local_quats_var, p=2, dim=1)
-        
-        root_local_q = normalized_quats[0]
-        curr_global_q = quat_mul(root_parent_global_q, root_local_q)
-        curr_global_pos = torch.tensor(joint_positions[root_idx], dtype=torch.float32)
-        
-        for i in range(len(ik_joint_path) - 1):
-            idx = ik_joint_path[i]
-            next_idx = ik_joint_path[i + 1]
-            
-            if joint_parents[idx] == next_idx:
-                # 逆向 (Child -> Parent)
-                local_q = normalized_quats[i] # Current node local
-                next_global_q = quat_mul(curr_global_q, quat_inv(local_q))
-                
-                offset = joint_offsets_t[idx]
-                next_global_pos = curr_global_pos - quat_apply(next_global_q, offset)
-                
-            else:
-                # 正向 (Parent -> Child)
-                local_q = normalized_quats[i+1] 
-                next_global_q = quat_mul(curr_global_q, local_q)
-                
-                offset = joint_offsets_t[next_idx]
-                next_global_pos = curr_global_pos + quat_apply(curr_global_q, offset)
-            
-            curr_global_pos = next_global_pos
-            curr_global_q = next_global_q
-            
-        loss = torch.norm(curr_global_pos - target_pose_t)
-        loss.backward()
-        optimizer.step()
-        
-        if loss.item() < 1e-4:
-            break
-    final_quats = torch.nn.functional.normalize(local_quats_var, p=2, dim=1).detach().numpy()
-    
-    # Update Root Global
-    if joint_parents[root_idx] == -1:
-        joint_orientations[root_idx] = final_quats[0]
-    else:
-        p_q = R.from_quat(joint_orientations[joint_parents[root_idx]])
-        l_q = R.from_quat(final_quats[0])
-        joint_orientations[root_idx] = (p_q * l_q).as_quat()
-        
-    # 后续传播逻辑同之前的代码...
-    
     return joint_positions, joint_orientations
 
 def part1_inverse_kinematics_CCD(meta_data, joint_positions, joint_orientations, target_pose, max_angle = 0.1):
@@ -250,7 +292,7 @@ def part1_inverse_kinematics_CCD(meta_data, joint_positions, joint_orientations,
     return joint_positions, joint_orientations
 
 
-def part1_inverse_kinematics(meta_data, joint_positions, joint_orientations, target_pose, max_rad = 0.1):
+def part1_inverse_kinematics_gradient(meta_data, joint_positions, joint_orientations, target_pose, max_rad = 0.1):
     """
     完成函数，计算逆运动学
     输入: 
@@ -288,21 +330,6 @@ def part1_inverse_kinematics(meta_data, joint_positions, joint_orientations, tar
             local_eulers.append((parent_q_inv * curr_q).as_euler("XYZ", degrees=False))            
     local_eulers_t = torch.tensor(np.array(local_eulers), dtype=torch.float32, requires_grad=True)
     target_pose_t = torch.tensor(target_pose, dtype=torch.float32)
-
-    def euler_to_mat(angle_vec):
-        x, y, z = angle_vec[0], angle_vec[1], angle_vec[2]
-        cx, sx = torch.cos(x), torch.sin(x)
-        cy, sy = torch.cos(y), torch.sin(y)
-        cz, sz = torch.cos(z), torch.sin(z)
-        
-        zeros = torch.zeros_like(x)
-        ones = torch.ones_like(x)
-        
-        rx = torch.stack([torch.stack([ones, zeros, zeros]), torch.stack([zeros, cx, -sx]), torch.stack([zeros, sx, cx])])
-        ry = torch.stack([torch.stack([cy, zeros, sy]), torch.stack([zeros, ones, zeros]), torch.stack([-sy, zeros, cy])])
-        rz = torch.stack([torch.stack([cz, -sz, zeros]), torch.stack([sz, cz, zeros]), torch.stack([zeros, zeros, ones])])
-        
-        return rz @ ry @ rx
 
     max_iter = 10
     alpha = 0.1
@@ -423,11 +450,108 @@ def part1_inverse_kinematics(meta_data, joint_positions, joint_orientations, tar
 def part2_inverse_kinematics(meta_data, joint_positions, joint_orientations, relative_x, relative_z, target_height):
     """
     输入lWrist相对于RootJoint前进方向的xz偏移，以及目标高度，IK以外的部分与bvh一致
+    使用两骨骼IK算法
     """
-    root_position = joint_positions[0]
-    target_pos = [root_position[0] + relative_x, target_height, root_position[2] + relative_z]
-    # joint_positions, joint_orientations = part1_inverse_kinematics_CCD(meta_data, joint_positions, joint_orientations, target_pos, max_angle = 0.2)
-    joint_positions, joint_orientations = part1_inverse_kinematics(meta_data, joint_positions, joint_orientations, target_pos)
+    # Two Bone IK
+    ik_joint_path, _, _, _ = meta_data.get_path_from_root_to_end()
+    root_id = ik_joint_path[0]
+    mid_id = ik_joint_path[1]
+    effector_id = ik_joint_path[2]
+
+    pos_target = np.array([joint_positions[0][0] + relative_x, target_height, joint_positions[0][2] + relative_z])
+    pos_root = joint_positions[root_id].copy()
+    pos_mid = joint_positions[mid_id].copy()
+    pos_effector = joint_positions[effector_id].copy()
+
+    # 计算骨骼长度
+    root_bone_len = np.linalg.norm(pos_mid - pos_root)
+    mid_bone_len = np.linalg.norm(pos_effector - pos_mid)
+    
+    # 从root指向target的向量
+    vec_root_target = pos_target - pos_root
+    root_target_len = np.linalg.norm(vec_root_target)
+    
+    max_len = root_bone_len + mid_bone_len
+    eps = 1e-6
+    
+    if root_target_len > max_len - eps:
+        # 如果目标不可达，拉伸到最大长度的位置
+        if root_target_len > eps:
+            pos_target = pos_root + (vec_root_target / root_target_len) * (max_len - eps)
+            vec_root_target = pos_target - pos_root
+            root_target_len = max_len - eps
+        else:
+            root_target_len = eps
+    elif root_target_len < eps:
+        # 避免重合导致的除零错误
+        root_target_len = eps
+
+    root_effector_len = np.linalg.norm(pos_effector - pos_root)
+    
+    # Pole Vector约束
+    pole_vector = np.array([0., -1., 0.])
+    
+    # 计算mid节点旋转
+    cos_mid_rad = (root_bone_len ** 2 + mid_bone_len ** 2 - root_target_len ** 2) / (2 * root_bone_len * mid_bone_len)
+    cos_mid_rad = np.clip(cos_mid_rad, -1.0, 1.0)
+    mid_rad = np.arccos(cos_mid_rad)
+    
+    cos_cur_rad = (root_bone_len ** 2 + mid_bone_len ** 2 - root_effector_len ** 2) / (2 * root_bone_len * mid_bone_len)
+    cos_cur_rad = np.clip(cos_cur_rad, -1.0, 1.0)
+    cur_rad = np.arccos(cos_cur_rad)
+    
+    delta = mid_rad - cur_rad
+    
+    # 使用pole vector作为旋转轴约束
+    # 旋转轴应该是root指向target方向与pole vector的叉积
+    root_target_dir = vec_root_target / root_target_len
+    rotation_axis = np.cross(root_target_dir, pole_vector)
+    rotation_axis_len = np.linalg.norm(rotation_axis)
+    
+    if rotation_axis_len > eps:
+        rotation_axis = rotation_axis / rotation_axis_len
+        mid_rot = R.from_rotvec(delta * rotation_axis)
+        
+        joint_orientations[mid_id] = (mid_rot * R.from_quat(joint_orientations[mid_id])).as_quat()
+        joint_orientations[effector_id] = (mid_rot * R.from_quat(joint_orientations[effector_id])).as_quat()
+        
+        effector_offset = pos_effector - pos_mid
+        pos_effector = pos_mid + mid_rot.apply(effector_offset)
+    
+    # 旋转root节点，对齐target方向
+    vec_root_effector = pos_effector - pos_root
+    vec_root_effector_norm = vec_root_effector / (np.linalg.norm(vec_root_effector) + eps)
+    vec_root_target_norm = vec_root_target / root_target_len
+    
+    # 计算旋转角度和轴
+    cos_angle = np.clip(np.dot(vec_root_effector_norm, vec_root_target_norm), -1.0, 1.0)
+    angle = np.arccos(cos_angle)
+    
+    axis = np.cross(vec_root_effector_norm, vec_root_target_norm)
+    axis_len = np.linalg.norm(axis)
+    
+    if axis_len > eps and angle > eps:
+        axis = axis / axis_len
+        root_rot = R.from_rotvec(axis * angle)
+        
+        joint_orientations[root_id] = (root_rot * R.from_quat(joint_orientations[root_id])).as_quat()
+        joint_orientations[mid_id] = (root_rot * R.from_quat(joint_orientations[mid_id])).as_quat()
+        joint_orientations[effector_id] = (root_rot * R.from_quat(joint_orientations[effector_id])).as_quat()
+        
+        joint_positions[mid_id] = pos_root + root_rot.apply(pos_mid - pos_root)
+        joint_positions[effector_id] = pos_root + root_rot.apply(pos_effector - pos_root)
+
+    else:
+        joint_positions[effector_id] = pos_target.copy()
+    
+    effector_rot = R.from_quat(joint_orientations[effector_id])
+    for i in range(len(joint_positions)):
+        if meta_data.joint_parent[i] == effector_id:
+            offset = meta_data.joint_initial_position[i] - meta_data.joint_initial_position[effector_id]
+            joint_positions[i] = joint_positions[effector_id] + effector_rot.apply(offset)
+            
+            # 旋转也跟随
+            joint_orientations[i] = joint_orientations[effector_id]
     return joint_positions, joint_orientations
 
 def bonus_inverse_kinematics(meta_data, joint_positions, joint_orientations, left_target_pose, right_target_pose):
