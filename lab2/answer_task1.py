@@ -1,7 +1,6 @@
 import numpy as np
 import copy
 from scipy.spatial.transform import Rotation as R
-from scipy.spatial.transform import Slerp
 # ------------- lab1里的代码 -------------#
 def load_meta_data(bvh_path):
     with open(bvh_path, 'r') as f:
@@ -204,12 +203,21 @@ class BVHMotion():
         '''
         输入: rotation 形状为(4,)的ndarray, 四元数旋转
         输出: Ry, Rxz，分别为绕y轴的旋转和转轴在xz平面的旋转，并满足R = Ry * Rxz
-        '''
-        Ry = np.zeros_like(rotation)
-        Rxz = np.zeros_like(rotation)
-        # TODO: 你的代码
         
-        return Ry, Rxz
+        使用twist-swing分解：将旋转分解为绕y轴的旋转和xz平面内的旋转
+        '''
+        # 将四元数转换为旋转矩阵
+        rot_matrix = R.from_quat(rotation).as_matrix()
+        
+        # 提取y轴旋转
+        theta_y = np.arctan2(rot_matrix[0, 2], rot_matrix[0, 0])
+        
+        Ry_rot = R.from_euler('Y', theta_y, degrees=False)
+        
+        total_rot = R.from_quat(rotation)
+        Rxz = (Ry_rot.inv() * total_rot).as_quat()
+        
+        return Ry_rot.as_quat(), Rxz
     
     # part 1
     def translation_and_rotation(self, frame_num, target_translation_xz, target_facing_direction_xz):
@@ -228,13 +236,92 @@ class BVHMotion():
         
         res = self.raw_copy() # 拷贝一份，不要修改原始数据
         
-        # 比如说，你可以这样调整第frame_num帧的根节点平移
+        # 调整第frame_num帧的根节点平移
         offset = target_translation_xz - res.joint_position[frame_num, 0, [0,2]]
         res.joint_position[:, 0, [0,2]] += offset
-        # TODO: 你的代码
+        
+        # 提取z轴夹角
+        z_axis = [0, 1]
+        curr_rotation = res.joint_rotation[frame_num, 0]  # 取指定帧的根节点旋转
+        Ry, Rxz = self.decompose_rotation_with_yaxis(curr_rotation)
+
+        target_facing = target_facing_direction_xz / np.linalg.norm(target_facing_direction_xz)
+        cos_delta = np.clip(np.dot(target_facing, z_axis), -1, 1)
+        sin_delta = np.clip(np.cross(target_facing, z_axis), -1, 1)
+        delta = np.arccos(cos_delta)
+        if sin_delta < 0:
+            delta = 2 * np.pi - delta
+        
+        Ry = R.from_quat(Ry)
+        new_Ry = R.from_euler("Y", delta, degrees=False)
+        # 更新第frame_num帧的根节点旋转到所有帧
+        res.joint_rotation[:, 0] = (new_Ry * Ry.inv() * R.from_quat(res.joint_rotation[:, 0, :])).as_quat()
+        # 更新位移，应用旋转
+        for i in range(len(res.joint_position)):
+            off = res.joint_position[i, 0] - res.joint_position[frame_num, 0]
+            res.joint_position[i, 0] = (new_Ry * Ry.inv()).as_matrix()  @ off + res.joint_position[frame_num,0]
+
         return res
 
 # part2
+def Slerp(rotation1, rotation2, t):
+    '''
+    球面线性插值 (Spherical Linear Interpolation)
+    用于在两个四元数之间进行平滑的旋转插值
+    
+    输入:
+        rotation1: 四元数 (4,)，格式为 [x, y, z, w]
+        rotation2: 四元数 (4,)，格式为 [x, y, z, w]
+        t: 插值参数，范围 [0, 1]，t=0 返回 rotation1，t=1 返回 rotation2
+    
+    返回:
+        插值后的四元数 (4,)
+    '''
+    q0 = np.array(rotation1, dtype=np.float64)
+    q1 = np.array(rotation2, dtype=np.float64)
+    
+    dot_product = np.dot(q0, q1)    
+    dot_product = np.clip(dot_product, -1.0, 1.0)
+    if dot_product < 0.0:
+        q1 = -q1
+        dot_product = -dot_product
+    
+    if dot_product > 0.9995:
+        result = q0 + t * (q1 - q0)
+        return result / np.linalg.norm(result)
+    
+    theta = np.arccos(dot_product)
+    sin_theta = np.sin(theta)
+    
+    w0 = np.sin((1.0 - t) * theta) / sin_theta
+    w1 = np.sin(t * theta) / sin_theta
+    
+    # 进行球面线性插值
+    result = w0 * q0 + w1 * q1
+    
+    return result
+
+def lerp_to(bvh_motion, target_len):
+    curr_len = len(bvh_motion.joint_position)
+    res = bvh_motion.raw_copy()
+    res.joint_position = np.zeros((target_len, res.joint_position.shape[1], res.joint_position.shape[2]))
+    res.joint_rotation = np.zeros((target_len, res.joint_rotation.shape[1], res.joint_rotation.shape[2]))
+    res.joint_rotation[...,3] = 1.0
+
+    for i in range(target_len):
+        j_float = i * (curr_len - 1) / (target_len - 1) if target_len > 1 else 0
+        j = int(np.floor(j_float))
+        j = min(j, curr_len - 2)
+        t = j_float - j
+        
+        res.joint_position[i] = (1 - t) * bvh_motion.joint_position[j] + t * bvh_motion.joint_position[j + 1]
+        
+        for joint_idx in range(res.joint_rotation.shape[1]):
+            rot_slerp = Slerp(bvh_motion.joint_rotation[j, joint_idx], bvh_motion.joint_rotation[j + 1, joint_idx], t)
+            res.joint_rotation[i, joint_idx] = rot_slerp
+
+    return res
+
 def blend_two_motions(bvh_motion1, bvh_motion2, alpha):
     '''
     blend两个bvh动作
@@ -243,14 +330,22 @@ def blend_two_motions(bvh_motion1, bvh_motion2, alpha):
     返回的动作应该有n3帧，第i帧由(1-alpha[i]) * bvh_motion1[j] + alpha[i] * bvh_motion2[k]得到
     i均匀地遍历0~n3-1的同时，j和k应该均匀地遍历0~n1-1和0~n2-1
     '''
-    
     res = bvh_motion1.raw_copy()
     res.joint_position = np.zeros((len(alpha), res.joint_position.shape[1], res.joint_position.shape[2]))
     res.joint_rotation = np.zeros((len(alpha), res.joint_rotation.shape[1], res.joint_rotation.shape[2]))
     res.joint_rotation[...,3] = 1.0
 
-    # TODO: 你的代码
-    
+    target_len = len(alpha)
+    bvh1 = lerp_to(bvh_motion1, target_len)
+    bvh2 = lerp_to(bvh_motion2, target_len)
+
+    for i in range(target_len):
+        res.joint_position[i] = (1 - alpha[i]) * bvh1.joint_position[i] + alpha[i] * bvh2.joint_position[i]
+        
+        for joint_idx in range(res.joint_rotation.shape[1]):
+            rot_slerp = Slerp(bvh1.joint_rotation[i, joint_idx], bvh2.joint_rotation[i, joint_idx], alpha[i])
+            res.joint_rotation[i, joint_idx] = rot_slerp
+
     return res
 
 # part3
@@ -267,8 +362,84 @@ def build_loop_motion(bvh_motion):
     from smooth_utils import build_loop_motion
     return build_loop_motion(res)
 
+def smooth_alpha(n, start_derivative=0, end_derivative=0):
+    '''
+    生成带有指定导数的平滑三次函数权重参数
+    使用三次Hermite基函数
+    
+    输入:
+        n: 生成的点数
+        start_derivative: 在 t=0 处的导数
+        end_derivative: 在 t=1 处的导数
+    
+    返回:
+        形状为 (n,) 的 ndarray，从 0 平滑过渡到 1
+    '''
+    if n == 1:
+        return np.array([1.0])
+    
+    t = np.linspace(0, 1, n)
+    
+    # 三次Hermite基函数
+    h00 = 2*t**3 - 3*t**2 + 1
+    h10 = t**3 - 2*t**2 + t
+    h01 = -2*t**3 + 3*t**2
+    h11 = t**3 - t**2
+    
+    # 使用Hermite插值：p(t) = h00*p0 + h10*m0 + h01*p1 + h11*m1
+    # 其中 p0=0, p1=1, m0=start_derivative, m1=end_derivative
+    alpha = np.clip(h00 * 0 + h10 * start_derivative + h01 * 1 + h11 * end_derivative, 0.0, 1.0)
+    
+    return alpha
+
 # part4
-def concatenate_two_motions(bvh_motion1, bvh_motion2, mix_frame1, mix_time):
+def get_feet_metrics(bvh_motion:BVHMotion, frame_idx=0):
+    '''
+    计算指定帧的脚步特征：相对于根节点的位置
+    '''
+    joint_pos_frame = bvh_motion.joint_position[frame_idx:frame_idx+2]
+    joint_rot_frame = bvh_motion.joint_rotation[frame_idx:frame_idx+2]
+    
+    joint_positions, _ = bvh_motion.batch_forward_kinematics(joint_pos_frame, joint_rot_frame)
+    
+    # 获取左脚关节索引并计算相对位置和速度
+    feet_index = bvh_motion.joint_name.index("lToeJoint")
+    feet_relative_pos = joint_positions[0, feet_index] - joint_positions[0, 0]  # 相对于根节点
+    feet_relative_pos_next = joint_positions[1, feet_index] - joint_positions[1, 0]
+    feet_relative_speed = feet_relative_pos_next - feet_relative_pos
+
+    return feet_relative_pos, feet_relative_speed
+
+def find_best_transition_frame(motion1, motion2, center_frame, search_range):
+    '''
+    在 motion1 的 center_frame 附近寻找与 motion2 第0帧最匹配的帧
+    '''
+    min_cost = float('inf')
+    best_frame = center_frame
+    
+    feet_index = motion1.joint_name.index("lToeJoint")
+    target_rel_pos, target_vel = get_feet_metrics(motion2, 0)
+    
+    start_search = max(1, center_frame - search_range) # 从1开始确保能算速度
+    end_search = min(motion1.motion_length - 1, center_frame + search_range)
+    
+    for i in range(start_search, end_search):
+        # 获取 motion1 候选帧的特征
+        curr_rel_pos, curr_vel = get_feet_metrics(motion1, i)
+        w_pos = 0.1
+        w_vel = 1.0
+        dist_pos = np.sum((curr_rel_pos - target_rel_pos)**2)
+        dist_vel = np.sum((curr_vel - target_vel)**2)
+        
+        cost = w_pos * dist_pos + w_vel * dist_vel
+        
+        if cost < min_cost:
+            min_cost = cost
+            best_frame = i
+            
+    return best_frame
+
+def concatenate_two_motions(bvh_motion1:BVHMotion, bvh_motion2:BVHMotion, mix_frame1, mix_time):
     '''
     将两个bvh动作平滑地连接起来，mix_time表示用于混合的帧数
     混合开始时间是第一个动作的第mix_frame1帧
@@ -276,12 +447,40 @@ def concatenate_two_motions(bvh_motion1, bvh_motion2, mix_frame1, mix_time):
     Tips:
         你可能需要用到BVHMotion.sub_sequence 和 BVHMotion.append
     '''
-    res = bvh_motion1.raw_copy()
+    len1 = bvh_motion1.motion_length
+    len2 = bvh_motion2.motion_length
+
+    # 获取相对root的位移
+    l_foot_pos_target = get_feet_metrics(bvh_motion2, 0)
+    l_foot_pos_curr = get_feet_metrics(bvh_motion1, mix_frame1)
+    mix_frame = find_best_transition_frame(bvh_motion1, bvh_motion2, mix_frame1, 60)
     
-    # TODO: 你的代码
-    # 下面这种直接拼肯定是不行的(
-    res.joint_position = np.concatenate([res.joint_position[:mix_frame1], bvh_motion2.joint_position], axis=0)
-    res.joint_rotation = np.concatenate([res.joint_rotation[:mix_frame1], bvh_motion2.joint_rotation], axis=0)
+    print(f"在第{mix_frame}帧混合，原帧数{mix_frame1}")
+    # 从第一个动作的mix_frame1帧获取目标位置和朝向
+    target_translation = bvh_motion1.joint_position[mix_frame, 0]
+    target_rotation = bvh_motion1.joint_rotation[mix_frame, 0]
     
-    return res
+    # 对齐位置（只需要xz平面）
+    target_translation_xz = np.array([target_translation[0], target_translation[2]])
+    
+    # 对齐朝向
+    rotation_y, _ = bvh_motion1.decompose_rotation_with_yaxis(target_rotation)
+    z_axis = np.array([0, 0, 1]) 
+    target_facing_direction = R.from_quat(rotation_y).as_matrix() @ z_axis
+    target_facing_direction_xz = np.array([target_facing_direction[0], target_facing_direction[2]])
+
+    bvh_motion2 = bvh_motion2.translation_and_rotation(0, target_translation_xz, target_facing_direction_xz)
+    
+    # 分段处理动作
+    mix_time = mix_time * 2
+    sequence = bvh_motion1.sub_sequence(0, mix_frame + 1)
+    sequence1 = bvh_motion1.sub_sequence(mix_frame, len1)
+    sequence2 = bvh_motion2.sub_sequence(0, min(mix_time, len2))
+    sequence3 = bvh_motion2.sub_sequence(mix_time, len2)
+    alpha = smooth_alpha(mix_time, start_derivative=-0.1, end_derivative=0)
+    
+    blend_sequence = blend_two_motions(sequence1, sequence2, alpha)
+    sequence.append(blend_sequence)
+    sequence.append(sequence3)
+    return sequence
 

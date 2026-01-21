@@ -35,7 +35,7 @@ class ShowBVHUpdate():
 def part1_translation_and_rotation(viewer, setting_id):
     
     # 一些不同的设置
-    bvh_list = ['motion_material/walk_forward.bvh', 'motion_material/run_forward.bvh', 'motion_material/walk_and_turn_left.bvh']
+    bvh_list = ['lab2/motion_material/walk_forward.bvh', 'lab2/motion_material/run_forward.bvh', 'lab2/motion_material/walk_and_turn_left.bvh']
     pos_xz_list = [np.array([-4,4]), np.array([2,4]), np.array([6,1])]
     facing_xz_list = [np.array([1,1]), np.array([5,1]), np.array([1,1])]
     frame_list = [0, -1, -1]
@@ -61,8 +61,8 @@ def part1_translation_and_rotation(viewer, setting_id):
 def part2_interpolate(viewer, v):
     
     # 读取动作
-    walk_forward = BVHMotion('motion_material/walk_forward.bvh')
-    run_forward = BVHMotion('motion_material/run_forward.bvh')
+    walk_forward = BVHMotion('lab2/motion_material/walk_forward.bvh')
+    run_forward = BVHMotion('lab2/motion_material/run_forward.bvh')
     run_forward.adjust_joint_name(walk_forward.joint_name)
     
     # 调整方向和位置, 对齐第一帧
@@ -88,13 +88,13 @@ def part3_build_loop(viewer):
     # 不用自己写(但是你可以试着写一下)
     # 推荐阅读 https://theorangeduck.com/
     # Blog名称: Creating Looping Animations from Motion Capture
-    motion = BVHMotion('motion_material/run_forward.bvh')
+    motion = BVHMotion('lab2/motion_material/run_forward.bvh')
     motion = build_loop_motion(motion)
     
     pos = motion.joint_position[-1,0,[0,2]]
     rot = motion.joint_rotation[-1,0]
     facing_axis = R.from_quat(rot).apply(np.array([0,0,1])).flatten()[[0,2]]
-    new_motion = motion.translation_and_rotation(0, pos, facing_axis)
+    new_motion = motion.translation_and_rotation(0, pos, facing_axis)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
     motion.append(new_motion)
     translation, orientation = motion.batch_forward_kinematics()
     task = ShowBVHUpdate(viewer, motion.joint_name, translation, orientation)
@@ -103,10 +103,10 @@ def part3_build_loop(viewer):
 
 def part4_concatenate(viewer, setting_id):
     if setting_id == 0:
-        walk_forward = BVHMotion('motion_material/walkF.bvh')
+        walk_forward = BVHMotion('lab2/motion_material/walkF.bvh')
         mix_time = 78 # 一个长motion,手动指定混合时间
     else:
-        walk_forward = BVHMotion('motion_material/walk_forward.bvh')
+        walk_forward = BVHMotion('lab2/motion_material/walk_forward.bvh')
         walk_forward = build_loop_motion(walk_forward)
         mix_time = walk_forward.motion_length # 一个循环motion,自动计算混合时间
         
@@ -118,7 +118,7 @@ def part4_concatenate(viewer, setting_id):
         new_motion = motion.translation_and_rotation(0, pos, facing_axis)
         walk_forward.append(new_motion)
     
-    run_forward = BVHMotion('motion_material/run_forward.bvh')
+    run_forward = BVHMotion('lab2/motion_material/run_forward.bvh')
     run_forward.adjust_joint_name(walk_forward.joint_name)
     
     motion = concatenate_two_motions(walk_forward, run_forward, mix_time, 30)
@@ -135,10 +135,10 @@ def main():
     # 请自行取消需要的注释并更改测试setting_id
     # 请不要同时取消多个注释，否则前者会被后者覆盖
     
-    part1_translation_and_rotation(viewer, 0) # 数字代表不同的测试setting
+    #part1_translation_and_rotation(viewer, 2) # 数字代表不同的测试setting
     # part2_interpolate(viewer, 1) # 数字代表不同期望的前进速度
     # part3_build_loop(viewer)
-    # part4_concatenate(viewer, 0) # 数字代表不同的测试setting
+    part4_concatenate(viewer, 1) # 数字代表不同的测试setting
     viewer.run()
     
 if __name__ == '__main__':
